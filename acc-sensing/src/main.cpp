@@ -1,104 +1,150 @@
-/*
-    Description: Read ACCEL Unit three-axis acceleration
-    Please install library before compiling:  
-    Arduino-ADXL345: https://github.com/jakalada/Arduino-ADXL345
-*/
 #include <M5Stack.h>
-#include <ADXL345.h>
-ADXL345 accel(ADXL345_ALT);
 
-void setup() {
-  // put your setup code here, to run once:
-  M5.begin();
-  M5.Speaker.begin(); // これが無いとmuteしても無意味です。
-  M5.Speaker.mute();
+#define LCDHIGH 240
+#define LCDWIDTH 320
 
-  M5.Power.begin();
-  Wire.begin();
-  M5.Lcd.setCursor(140, 10, 4);
-  M5.Lcd.println("ACC");
+#define BUTTONA 39
+#define BUTTONB 38
+#define BUTTONC 37
 
-  M5.Lcd.setCursor(40, 100); M5.Lcd.print(" x ");
-  M5.Lcd.setCursor(140, 100); M5.Lcd.print(" y ");
-  M5.Lcd.setCursor(240, 100); M5.Lcd.print(" z ");
+#define BUTTON_ON 0
+#define BUTTON_OFF 1
 
-  byte deviceID = accel.readDeviceID();
-  if (deviceID != 0) {
-    Serial.print("0x");
-    Serial.print(deviceID, HEX);
-    Serial.println("");
-  } else {
-    Serial.println("read device id: failed");
-    while(1) {
-      delay(100);
-    }
-  }
+//TFT_eSPI liblary
+TFT_eSPI tft = TFT_eSPI();
 
-  // Data Rate
-  // - ADXL345_RATE_3200HZ: 3200 Hz
-  // - ADXL345_RATE_1600HZ: 1600 Hz
-  // - ADXL345_RATE_800HZ:  800 Hz
-  // - ADXL345_RATE_400HZ:  400 Hz
-  // - ADXL345_RATE_200HZ:  200 Hz
-  // - ADXL345_RATE_100HZ:  100 Hz
-  // - ADXL345_RATE_50HZ:   50 Hz
-  // - ADXL345_RATE_25HZ:   25 Hz
-  // - ...
-  if (!accel.writeRate(ADXL345_RATE_3200HZ)) {
-    Serial.println("write rate: failed");
-    while(1) {
-      delay(100);
-    }
-  }
+//thread config
+TaskHandle_t LCDdiplay;
+TaskHandle_t timeCalculation;
 
-  // Data Range
-  // - ADXL345_RANGE_2G: +-2 g
-  // - ADXL345_RANGE_4G: +-4 g
-  // - ADXL345_RANGE_8G: +-8 g
-  // - ADXL345_RANGE_16G: +-16 g
-  if (!accel.writeRange(ADXL345_RANGE_2G)) {
-    Serial.println("write range: failed");
-    while(1) {
-      delay(100);
-    }
-  }
+//timer interrupt variable.
+volatile unsigned long usecCount = 0;
+hw_timer_t *interrupptTimer = NULL;
+portMUX_TYPE mutex = portMUX_INITIALIZER_UNLOCKED;
 
-  if (!accel.start()) {
-    Serial.println("start: failed");
-    while(1) {
-      delay(100);
-    }
+//min,sec,msec,usec display.
+int display[4] = {0};
+
+//timer start/stop check variable
+int startCheck = 0;
+
+void thread1(void *pvParameters)
+{
+  //unsigned long preusecCount = 0;
+
+  while (1)
+  {
+    //count display
+
+    tft.setCursor(0, LCDWIDTH / 3);
+    tft.printf(" m: s: ms: us\n");
+    tft.printf("%02d:", display[0]);
+    tft.printf("%02d:", display[1]);
+    tft.printf("%03d:", display[2]);
+    tft.printf("%03d\n", display[3]);
+    tft.printf("%lu", usecCount);
+
+    vTaskDelay(1);
   }
 }
 
-unsigned long preTime, postTime, interval;
+//Timer count
+void IRAM_ATTR usecTimer()
+{
+  portENTER_CRITICAL_ISR(&mutex);
+  usecCount += 5;
+  portEXIT_CRITICAL_ISR(&mutex);
+}
 
-void loop() {
-  // put your main code here, to run repeatedly:
-    if (accel.update()) {
-    // M5.Lcd.fillRect(0, 130, 360, 30, BLACK);
-    // M5.Lcd.setCursor(35,  130); M5.Lcd.print((int)(1000*accel.getX()));
-    // M5.Lcd.setCursor(135, 130); M5.Lcd.print((int)(1000*accel.getY()));
-    // M5.Lcd.setCursor(235, 130); M5.Lcd.print((int)(1000*accel.getZ()));
+void setup()
+{
 
-    // accel.getX();
-    // accel.getY();
-    // accel.getZ();
+  // initialize the M5Stack object
+  M5.begin();
 
-    // postTime = millis();
-    // interval = postTime - preTime;
-    // M5.Lcd.setCursor(135, 200); M5.Lcd.print(interval);
-    // preTime = preTime;
+  //GPIO setting
+  pinMode(BUTTONA, INPUT);
+  pinMode(BUTTONB, INPUT);
+  pinMode(BUTTONC, INPUT);
 
-    Serial.print(micros()); 
-    Serial.print("\n");
-    delayMicroseconds(50);
-    //M5.Lcd.setCursor(300, 130); M5.Lcd.print("mg");
-  } else {
-    Serial.println("update failed");
-    while(1) {
-      // delay(100);
+  //TFT_eSPI setup
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  //interrupt timer setting
+  //timerBegin is count per 100 microsec.
+  interrupptTimer = timerBegin(0, 80, true);
+
+  //interrupt method setting
+  timerAttachInterrupt(interrupptTimer, &usecTimer, true);
+
+  //interrupt timing setting.
+  timerAlarmWrite(interrupptTimer, 5, true);
+  timerAlarmDisable(interrupptTimer);
+  //timerAlarmEnable(interupptTimer);
+
+  //Core 0 thread
+  xTaskCreatePinnedToCore(
+      thread1,
+      "LCDdiplay",
+      8192,
+      NULL,
+      3,
+      &LCDdiplay,
+      0);
+}
+
+//Core1 thread
+void loop()
+{
+  //Start Button Check
+  if (digitalRead(BUTTONA) != BUTTON_OFF && startCheck == 0)
+  {
+    if (digitalRead(BUTTONA) != BUTTON_OFF)
+    {
+      delayMicroseconds(100);
+      for (;;)
+      {
+        if (digitalRead(BUTTONA) == BUTTON_OFF)
+          break;
+      }
+      portENTER_CRITICAL(&mutex);
+      timerAlarmEnable(interrupptTimer);
+      startCheck = 1;
+      portEXIT_CRITICAL(&mutex);
     }
   }
-  // delay(100);
+
+  //Stop Button Check
+  if (digitalRead(BUTTONA) != BUTTON_OFF && startCheck == 1)
+  {
+    if (digitalRead(BUTTONA) != BUTTON_OFF)
+    {
+      delayMicroseconds(100);
+      for (;;)
+      {
+        if (digitalRead(BUTTONA) == BUTTON_OFF)
+          break;
+      }
+      portENTER_CRITICAL(&mutex);
+      timerAlarmDisable(interrupptTimer);
+      startCheck = 0;
+      portEXIT_CRITICAL(&mutex);
+    }
+  }
+
+  //Count Reset Check
+  if (digitalRead(BUTTONB) != BUTTON_OFF && startCheck == 0)
+  {
+    if (digitalRead(BUTTONB) != BUTTON_OFF)
+      usecCount = 0;
+  }
+  Serial.print(micros());
+  Serial.print("\n");
+  //time calculation
+  display[3] = (int)(usecCount % 1000);
+  display[2] = (int)((usecCount % 1000000) / 1000);
+  display[1] = (int)((usecCount / 1000000) % 60);
+  display[0] = (int)((usecCount / 60000000) % 3600);
 }

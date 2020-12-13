@@ -12,3 +12,6 @@ https://github.com/m5stack/M5Stack/blob/master/examples/Unit/ACCEL_ADXL345/ACCEL
 
 
 GROVE 白：SCL、黄色：SDA
+
+## タイマー割り込み（ストップウォッチ）
+https://qiita.com/zasshyu6/items/c0bd9bb592192b3c80e7
